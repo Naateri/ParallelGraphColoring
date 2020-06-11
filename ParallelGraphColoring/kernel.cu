@@ -12,6 +12,8 @@
 
 #include <thrust/count.h>
 
+#include <random>
+
 using namespace std;
 
 // Reads Matrix in Matrix Market format (.mtx)
@@ -75,14 +77,17 @@ __global__ void color_jpl_kernel(int n, int c, const int* Ao,
     const int* Ac, const float* Av,
     const int* randoms, int* colors)
 {
-    for (int i = threadIdx.x + blockIdx.x * blockDim.x;
+   for (int i = threadIdx.x + blockIdx.x * blockDim.x;
         i < n;
         i += blockDim.x * gridDim.x)
     {
+    //int i = threadIdx.x + blockIdx.x * blockDim.x;
+    //if (i < n){
         bool f = true; // true iff you have max random
 
         // ignore nodes colored earlier
         if ((colors[i] != -1)) continue;
+        //if ((colors[i] != -1)) return;
 
         int ir = randoms[i];
 
@@ -93,7 +98,10 @@ __global__ void color_jpl_kernel(int n, int c, const int* Ao,
             int jc = colors[j];
             if (((jc != -1) && (jc != c)) || (i == j)) continue;
             int jr = randoms[j];
-            if (ir <= jr) f = false;
+            if (ir <= jr) {
+                f = false;
+                break;
+            }
         }
 
         // assign color if you have the maximum random number
@@ -104,39 +112,58 @@ __global__ void color_jpl_kernel(int n, int c, const int* Ao,
 int get_rand(int max) {
     srand((unsigned)time(NULL));
     return rand() % max;
+
+   /* string str = "test";
+    std::seed_seq seed1(str.begin(), str.end());
+
+    std::mt19937 g2(seed1);
+
+    return (int)g2();*/
 }
 
 void init_rand_array(int*& randoms, int size) {
     for (int i = 0; i < size; i++) {
-        randoms[i] = get_rand(size << 1);
+        randoms[i] = get_rand(size << 2);
     }
 }
 
 void color_jpl(int n,
     const int* Ao, const int* Ac, const float* Av,
-    int* colors)
+    int* colors, int* d_randoms)
 {
-    int* randoms; // allocate and init random array 
-    randoms = new int[n];
-
-    init_rand_array(randoms, n);
 
     thrust::fill(colors, colors + n, -1); // init colors to -1
 
+    int* d_colors;
+    cudaMalloc((void**)&d_colors, n * sizeof(int));
+    cudaMemcpy(d_colors, colors, n * sizeof(int), cudaMemcpyHostToDevice);
+
     cout << "initiallized random numbers and colors\n";
 
+    cout << "nodes left: " << (int)thrust::count(colors, colors + n, -1) << endl;
     for (int c = 0; c < n; c++) {
         int nt = 256;
-        int nb = min((n + nt - 1) / nt, 1000);
+        //int nb = min((n + nt - 1) / nt, 1000);
+        int nb = (ceil(n / nt));
+        //cout << "color: " << c << endl;
         color_jpl_kernel << <nb, nt >> > (n, c,
             Ao, Ac, Av,
-            randoms,
-            colors);
+            d_randoms,
+            d_colors);
+        cudaDeviceSynchronize();
+        cudaMemcpy(colors, d_colors, n * sizeof(int), cudaMemcpyDeviceToHost);
         int left = (int)thrust::count(colors, colors + n, -1);
+        cout << "nodes left: " << left << endl;
         if (left == 0) break;
     }
 
-    delete[] randoms;
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(colors, d_colors, n * sizeof(int), cudaMemcpyDeviceToHost);
+
+    //delete[] randoms;
+    //cudaFree(d_randoms);
+    cudaFree(d_colors);
 }
 
 
@@ -231,19 +258,37 @@ int main()
     //cout << "reordering " << reordering << endl;
 
     int* colors = new int[nnz];
+    //int* colors;
+    //cudaMallocManaged((void**)&colors, nnz * sizeof(int));
+    //int* d_colors;
+    //cudaMalloc((void**)&d_colors, nnz * sizeof(int));
     cout << "JPL algorithm time\n";
-    /*
+    
+    int* randoms; // allocate and init random array 
+    randoms = new int[nnz];
+
+    cout << "Initializing random values\n";
+    init_rand_array(randoms, nnz);
+    cout << "Rand values initialized\n";
+
+    int* d_randoms;
+    cudaMalloc((void**)&d_randoms, nnz * sizeof(int));
+
+    cudaMemcpy(d_randoms, randoms, nnz * sizeof(int), cudaMemcpyHostToDevice);
+
     cudaEvent_t start2, stop2;
     cudaEventCreate(&start2);
     cudaEventCreate(&stop2);
 
     cudaEventRecord(start2);
-    color_jpl(nnz, csrRowPtr, csrColInd, csrVal, colors);
+    color_jpl(nnz, d_csrRowPtr, d_csrColInd, d_csrVal, colors, d_randoms);
     cudaEventRecord(stop2);
 
     cudaEventSynchronize(stop2);
     float jpl_milli = 0;
     cudaEventElapsedTime(&jpl_milli, start2, stop2);
+
+    //cudaMemcpy(colors, d_colors, nnz * sizeof(int), cudaMemcpyDeviceToHost);
 
     cout << "Milliseconds for operation (JPL): " << jpl_milli << endl;
 
@@ -255,7 +300,7 @@ int main()
     }
 
     cout << "Colors: " << jpl_colors << endl;
-    */
+    
     delete[] csrVal;
     delete[] csrRowPtr;
     delete[] csrColInd;
