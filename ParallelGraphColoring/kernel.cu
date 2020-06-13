@@ -13,6 +13,10 @@
 #include <thrust/count.h>
 
 #include <random>
+// random number generator
+#include <intrin.h>
+
+#pragma intrinsic(__rdtsc)
 
 using namespace std;
 
@@ -25,7 +29,16 @@ void read_mat(char* filename, float*& csrValA, int*& csrRowPtrA, int*& csrColInd
     ifstream readfile(filename);
 
     while (readfile.peek() == '%') readfile.ignore(2048, '\n');
-
+    /*
+    std::string str;
+    getline(readfile, str);
+    char c;
+    sscanf(str.c_str(), "%c", &c);
+    while (c == '%') {
+        getline(readfile, str);
+        sscanf(str.c_str(), "%c", &c);
+    }
+    */
     // Ignore lines with % (comment)
     // First line: dimension of matrix + non-zero values
     // Read defining parameters:
@@ -111,6 +124,7 @@ __global__ void color_jpl_kernel(int n, int c, const int* Ao,
 
 int get_rand(int max) {
     srand((unsigned)time(NULL));
+    //srand(__rdtsc());
     return rand() % max;
 
    /* string str = "test";
@@ -124,6 +138,7 @@ int get_rand(int max) {
 void init_rand_array(int*& randoms, int size) {
     for (int i = 0; i < size; i++) {
         randoms[i] = get_rand(size << 2);
+        //cout << "rand " << randoms[i] << endl;
     }
 }
 
@@ -175,8 +190,8 @@ int main()
     int* csrColInd;
 
     int nnz, rows, cols;
-
     read_mat("Matrices/offshore.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
+    //read_mat("Matrices/parabolic_fem.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
 
     cout << "Rows cols nnz " << rows << " " << cols << " " << nnz << endl;
 
@@ -229,7 +244,7 @@ int main()
         printf("error!");
         exit(1);
     }
-
+    
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
@@ -245,7 +260,7 @@ int main()
 
     cout << "Milliseconds for operation (CC): " << milliseconds << endl;
     cout << "Colors: " << ncolors << endl;
-
+    
     /*
     for (int i = 0; i < rows; i++) {
         printf("coloring[%d]: %d\n", i, coloring[i]);
@@ -257,7 +272,7 @@ int main()
     //cout << "coloring " << coloring << endl;
     //cout << "reordering " << reordering << endl;
 
-    int* colors = new int[nnz];
+    int* colors = new int[rows];
     //int* colors;
     //cudaMallocManaged((void**)&colors, nnz * sizeof(int));
     //int* d_colors;
@@ -265,23 +280,23 @@ int main()
     cout << "JPL algorithm time\n";
     
     int* randoms; // allocate and init random array 
-    randoms = new int[nnz];
+    randoms = new int[rows];
 
     cout << "Initializing random values\n";
-    init_rand_array(randoms, nnz);
+    init_rand_array(randoms, rows);
     cout << "Rand values initialized\n";
 
     int* d_randoms;
-    cudaMalloc((void**)&d_randoms, nnz * sizeof(int));
+    cudaMalloc((void**)&d_randoms, rows * sizeof(int));
 
-    cudaMemcpy(d_randoms, randoms, nnz * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_randoms, randoms, rows * sizeof(int), cudaMemcpyHostToDevice);
 
     cudaEvent_t start2, stop2;
     cudaEventCreate(&start2);
     cudaEventCreate(&stop2);
 
     cudaEventRecord(start2);
-    color_jpl(nnz, d_csrRowPtr, d_csrColInd, d_csrVal, colors, d_randoms);
+    color_jpl(rows, d_csrRowPtr, d_csrColInd, d_csrVal, colors, d_randoms);
     cudaEventRecord(stop2);
 
     cudaEventSynchronize(stop2);
@@ -293,7 +308,7 @@ int main()
     cout << "Milliseconds for operation (JPL): " << jpl_milli << endl;
 
     int jpl_colors = 0;
-    for (int i = 0; i < nnz; i++) {
+    for (int i = 0; i < rows; i++) {
         if (colors[i] > jpl_colors) {
             jpl_colors = colors[i];
         }
