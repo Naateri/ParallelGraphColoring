@@ -20,6 +20,10 @@
 
 using namespace std;
 
+int iDivUp(int a, int b) {
+    return ((a % b) != 0) ? (a / b + 1) : (a / b);
+}
+
 // Reads Matrix in Matrix Market format (.mtx)
 // Returns Matrix in Compressed-Row Format (CSR)
 void read_mat(char* filename, float*& csrValA, int*& csrRowPtrA, int*& csrColIndA, int& cols, int& rows, int& nnz) {
@@ -155,12 +159,11 @@ void color_jpl(int n,
 
     cout << "initiallized random numbers and colors\n";
 
-    cout << "nodes left: " << (int)thrust::count(colors, colors + n, -1) << endl;
+    //cout << "nodes left: " << (int)thrust::count(colors, colors + n, -1) << endl;
     for (int c = 0; c < n; c++) {
         int nt = 256;
         //int nb = min((n + nt - 1) / nt, 1000);
         int nb = (ceil(n / nt));
-        //cout << "color: " << c << endl;
         color_jpl_kernel << <nb, nt >> > (n, c,
             Ao, Ac, Av,
             d_randoms,
@@ -168,7 +171,7 @@ void color_jpl(int n,
         cudaDeviceSynchronize();
         cudaMemcpy(colors, d_colors, n * sizeof(int), cudaMemcpyDeviceToHost);
         int left = (int)thrust::count(colors, colors + n, -1);
-        cout << "nodes left: " << left << endl;
+        //cout << "nodes left: " << left << endl;
         if (left == 0) break;
     }
 
@@ -182,31 +185,13 @@ void color_jpl(int n,
 }
 
 
+// graph_coloring
 
-int main()
-{
-    float* csrVal;
-    int* csrRowPtr;
-    int* csrColInd;
-
-    int nnz, rows, cols;
-    read_mat("Matrices/offshore.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
-    //read_mat("Matrices/parabolic_fem.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
-
-    cout << "Rows cols nnz " << rows << " " << cols << " " << nnz << endl;
-
-    int* d_csrRowPtr, * d_csrColInd;
-    float* d_csrVal;
-
-    // Separating space on GPU for matrix
-    cudaMalloc((void**)&d_csrRowPtr, (rows + 1) * sizeof(int));
-    cudaMalloc((void**)&d_csrColInd, nnz * sizeof(int));
-    cudaMalloc((void**)&d_csrVal, nnz * sizeof(float));
-
+void cusparse_graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, int*& d_coloring, int*& d_reordering) {
     // color and reordering info
-
+    
     int ncolors = 0, * coloring;
-    int* d_coloring, * d_reordering;
+    //int* d_coloring, * d_reordering;
     float fraction = 1.0;
     coloring = (int*)calloc(rows, sizeof(int));
 
@@ -215,13 +200,6 @@ int main()
     cudaMalloc((void**)&d_coloring, rows * sizeof(int));
     cudaMalloc((void**)&d_reordering, rows * sizeof(int));
     cudaMemset(d_reordering, 0, rows * sizeof(int));
-    cudaDeviceSynchronize();
-
-    // Sending matrix info to GPU
-
-    cudaMemcpy(d_csrRowPtr, csrRowPtr, (rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_csrColInd, csrColInd, nnz * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_csrVal, csrVal, nnz * sizeof(int), cudaMemcpyHostToDevice);
     cudaDeviceSynchronize();
 
     cusparseStatus_t status;
@@ -244,7 +222,7 @@ int main()
         printf("error!");
         exit(1);
     }
-    
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
@@ -260,7 +238,11 @@ int main()
 
     cout << "Milliseconds for operation (CC): " << milliseconds << endl;
     cout << "Colors: " << ncolors << endl;
-    
+
+}
+
+// implemented algorithm
+void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd) {  
     /*
     for (int i = 0; i < rows; i++) {
         printf("coloring[%d]: %d\n", i, coloring[i]);
@@ -273,12 +255,8 @@ int main()
     //cout << "reordering " << reordering << endl;
 
     int* colors = new int[rows];
-    //int* colors;
-    //cudaMallocManaged((void**)&colors, nnz * sizeof(int));
-    //int* d_colors;
-    //cudaMalloc((void**)&d_colors, nnz * sizeof(int));
     cout << "JPL algorithm time\n";
-    
+
     int* randoms; // allocate and init random array 
     randoms = new int[rows];
 
@@ -315,11 +293,348 @@ int main()
     }
 
     cout << "Colors: " << jpl_colors << endl;
+
+    delete[] colors;
+}
+
+void regular_ilu(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd) {
+    cudaEvent_t start3, stop3;
+    cudaEventCreate(&start3);
+    cudaEventCreate(&stop3);
+
+    cudaEventRecord(start3);
+
+    cusparseMatDescr_t descr_M = 0;
+    cusparseMatDescr_t descr_L = 0;
+    cusparseMatDescr_t descr_U = 0;
+    csrilu02Info_t info_M = 0;
+    csrsv2Info_t  info_L = 0;
+    csrsv2Info_t  info_U = 0;
+
+    cusparseStatus_t status;
+    cusparseHandle_t handle;
+    status = cusparseCreate(&handle);
+    if (status != CUSPARSE_STATUS_SUCCESS) {
+        printf("error!");
+        exit(1);
+    }
+
+    status = cusparseCreateMatDescr(&descr_M);
+    if (status != CUSPARSE_STATUS_SUCCESS) {
+        printf("error!");
+        exit(1);
+    }
+
+    // L and U matrix descriptors
+
+    cout << "Creating matrix descriptors\n";
+
+    cusparseCreateMatDescr(&descr_L);
+    cusparseSetMatIndexBase(descr_L, CUSPARSE_INDEX_BASE_ZERO);
+    cusparseSetMatType(descr_L, CUSPARSE_MATRIX_TYPE_GENERAL);
+    cusparseSetMatFillMode(descr_L, CUSPARSE_FILL_MODE_LOWER);
+    cusparseSetMatDiagType(descr_L, CUSPARSE_DIAG_TYPE_UNIT);
+
+    cusparseCreateMatDescr(&descr_U);
+    cusparseSetMatIndexBase(descr_U, CUSPARSE_INDEX_BASE_ZERO);
+    cusparseSetMatType(descr_U, CUSPARSE_MATRIX_TYPE_GENERAL);
+    cusparseSetMatFillMode(descr_U, CUSPARSE_FILL_MODE_UPPER);
+    cusparseSetMatDiagType(descr_U, CUSPARSE_DIAG_TYPE_NON_UNIT);
+
+    csrilu02Info_t info_C = 0; cusparseCreateCsrilu02Info(&info_C);
+    cusparseCreateCsrsv2Info(&info_L);
+    cusparseCreateCsrsv2Info(&info_U);
+
+    // buffer size
+
+    //cout << "init buffer sizes\n";
+
+    int pBufferSize_M, pBufferSize_L, pBufferSize_U;
+    cusparseScsrilu02_bufferSize(handle, rows, nnz, descr_M, d_csrVal, d_csrRowPtr, d_csrColInd, info_C, &pBufferSize_M);
+
+    cusparseScsrsv2_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnz,
+        descr_L, d_csrVal, d_csrRowPtr, d_csrColInd, info_L, &pBufferSize_L);
+    cusparseScsrsv2_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnz,
+        descr_U, d_csrVal, d_csrRowPtr, d_csrColInd, info_U, &pBufferSize_U);
+
+    int pBufferSize = max(pBufferSize_M, max(pBufferSize_L, pBufferSize_U));
+    void* pBuffer = 0; cudaMalloc((void**)&pBuffer, pBufferSize);
+
+    int structural_zero;
+
+    // problem analysis
+
+    //cout << "Problem analysis\n";
+
+    cusparseScsrilu02_analysis(handle, rows, nnz, descr_M, d_csrVal, d_csrRowPtr, d_csrColInd, info_C, CUSPARSE_SOLVE_POLICY_USE_LEVEL, pBuffer);
+    cusparseStatus_t status2 = cusparseXcsrilu02_zeroPivot(handle, info_C, &structural_zero);
+    if (CUSPARSE_STATUS_ZERO_PIVOT == status2) { printf("A(%d,%d) is missing\n", structural_zero, structural_zero); }
+
+    cusparseScsrsv2_analysis(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnz, descr_L,
+        d_csrVal, d_csrRowPtr, d_csrColInd,
+        info_L, CUSPARSE_SOLVE_POLICY_NO_LEVEL, pBuffer);
+
+    cusparseScsrsv2_analysis(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnz, descr_U,
+        d_csrVal, d_csrRowPtr, d_csrColInd,
+        info_U, CUSPARSE_SOLVE_POLICY_USE_LEVEL, pBuffer);
+
+    // M = L * U
+
+    //cout << "M = L * U\n";
+
+    int numerical_zero;
+    cusparseScsrilu02(handle, rows, nnz, descr_M, d_csrVal, d_csrRowPtr, d_csrColInd, info_C, CUSPARSE_SOLVE_POLICY_USE_LEVEL, pBuffer);
+    status2 = cusparseXcsrilu02_zeroPivot(handle, info_C, &numerical_zero);
+    if (CUSPARSE_STATUS_ZERO_PIVOT == status2) { printf("U(%d,%d) is zero\n", numerical_zero, numerical_zero); }
+
+    cudaEventRecord(stop3);
+
+    cudaEventSynchronize(stop3);
+    float ilu_milli = 0;
+    cudaEventElapsedTime(&ilu_milli, start3, stop3);
+
+    cout << "Regular ILU factorization done\n time: " << ilu_milli << endl;
+}
+
+// Auxiliar matrices of 1's created by reordering
+
+// elements per row = 1, so csrRowPtr[i] = i
+__global__ void setRowIndices(int* d_B_RowIndices, const int N) {
+
+    const int tid = threadIdx.x + blockDim.x * blockIdx.x;
+
+    if (tid == N)       d_B_RowIndices[tid] = N;
+    else if (tid < N)   d_B_RowIndices[tid] = tid;
+
+}
+
+// elements = 1.0f, so csrVal[i] = 1.0f;
+__global__ void setB(float* d_B, const int N) {
+
+    const int tid = threadIdx.x + blockDim.x * blockIdx.x;
+
+    if (tid < N)    d_B[tid] = 1.0f;
+
+}
+
+// ILU factorization using graph coloring for reordering
+void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd) {
+    cudaEvent_t start3, stop3;
+    cudaEventCreate(&start3);
+    cudaEventCreate(&stop3);
+
+    cudaEventRecord(start3);
+
+    // Matrix B: matrix of 1's
+
+    int* d_coloring, * d_csrColIndB;
+    int* d_csrRowPtrB;
+    float* d_csrValB;
+
+    const int BLOCKSIZE = 256;
+
+    // graph coloring
+    cusparse_graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, d_coloring, d_csrColIndB);
+
+    // storing coloring array and reordering array at host
+    int* h_coloring = (int*)malloc(rows * sizeof(int));
+    int* h_csrColIndB = (int*)malloc(rows * sizeof(int));
+    cudaMemcpy(h_coloring, d_coloring, rows * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_csrColIndB, d_csrColIndB, rows * sizeof(double), cudaMemcpyDeviceToHost);
+
+    // creating reordering matrix B
+
+    cudaMalloc((void**)&d_csrRowPtrB, (rows + 1) * sizeof(int));
+    int* h_csrRowPtrB = (int*)malloc((rows + 1) * sizeof(double));
+    setRowIndices << <iDivUp(rows + 1, BLOCKSIZE), BLOCKSIZE >> > (d_csrRowPtrB, rows); //d_csrRowPtrB[i] = i
+
+    cudaMalloc((void**)&d_csrValB, rows * sizeof(float));
+    float* h_csrValB = (float*)malloc(rows * sizeof(float));
+    setB << <iDivUp(rows, BLOCKSIZE), BLOCKSIZE >> > (d_csrValB, rows); // init csrValB with 1.0f
+
+    cudaMemcpy(h_csrValB, d_csrValB, rows * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // ILU factorization
+
+    int* d_csrColIndC;
+    int* d_csrRowPtrC;
+    float* d_csrValC;
+
+    cusparseMatDescr_t descrA;
+    cusparseCreateMatDescr(&descrA);
+
+    cusparseMatDescr_t descrB; cusparseCreateMatDescr(&descrB);
+    /*status = cusparseCreateMatDescr(&descr);
+    if (status != CUSPARSE_STATUS_SUCCESS) {
+        printf("error!");
+        exit(1);
+    }*/
+
+    cusparseMatDescr_t descrC = 0; // new matrix
+
+    // --- Descriptor for sparse matrix C
+    cusparseCreateMatDescr(&descrC);
+    cusparseSetMatType(descrC, CUSPARSE_MATRIX_TYPE_GENERAL);
+    cusparseSetMatIndexBase(descrC, CUSPARSE_INDEX_BASE_ZERO);
+
+    cusparseMatDescr_t descr_M = 0; // non-used
+    cusparseMatDescr_t descr_L = 0;
+    cusparseMatDescr_t descr_U = 0;
+    //csrilu02Info_t info_M = 0;
+    csrsv2Info_t  info_L = 0;
+    csrsv2Info_t  info_U = 0;
+
+    cusparseStatus_t status;
+    cusparseHandle_t handle;
+    status = cusparseCreate(&handle);
+    if (status != CUSPARSE_STATUS_SUCCESS) {
+        printf("error!");
+        exit(1);
+    }
+
+    status = cusparseCreateMatDescr(&descr_M);
+    if (status != CUSPARSE_STATUS_SUCCESS) {
+        printf("error!");
+        exit(1);
+    }
+
+    // L and U matrix descriptors
+
+    cout << "Creating matrix descriptors\n";
+
+    cusparseCreateMatDescr(&descr_L);
+    cusparseSetMatIndexBase(descr_L, CUSPARSE_INDEX_BASE_ZERO);
+    cusparseSetMatType(descr_L, CUSPARSE_MATRIX_TYPE_GENERAL);
+    cusparseSetMatFillMode(descr_L, CUSPARSE_FILL_MODE_LOWER);
+    cusparseSetMatDiagType(descr_L, CUSPARSE_DIAG_TYPE_UNIT);
+
+    cusparseCreateMatDescr(&descr_U);
+    cusparseSetMatIndexBase(descr_U, CUSPARSE_INDEX_BASE_ZERO);
+    cusparseSetMatType(descr_U, CUSPARSE_MATRIX_TYPE_GENERAL);
+    cusparseSetMatFillMode(descr_U, CUSPARSE_FILL_MODE_UPPER);
+    cusparseSetMatDiagType(descr_U, CUSPARSE_DIAG_TYPE_NON_UNIT);
+
+    csrilu02Info_t info_C = 0; cusparseCreateCsrilu02Info(&info_C);
+    cusparseCreateCsrsv2Info(&info_L);
+    cusparseCreateCsrsv2Info(&info_U);
+
+    // store at matrix C the reordered matrix
+
+    // --- Performing the matrix - matrix multiplication
+    int nnzB = nnz;
+    int nnzC;
+    int baseC;
+    int* nnzTotalDevHostPtr = &nnzC;
+
+    cusparseSetPointerMode(handle, CUSPARSE_POINTER_MODE_HOST);
+
+    //cudaMalloc((void**)&d_csrRowPtrC, (rows + 1) * sizeof(int));
+
+    cusparseXcsrgemmNnz(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, rows, rows, descrB, nnzB,
+        d_csrRowPtrB, d_csrColIndB, descrA, nnz, d_csrRowPtr, d_csrColInd, descrC, d_csrRowPtrC,
+        nnzTotalDevHostPtr);
+    if (NULL != nnzTotalDevHostPtr) nnzC = *nnzTotalDevHostPtr;
+    else {
+        cudaMemcpy(&nnzC, d_csrRowPtrC + rows, sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&baseC, d_csrRowPtrC, sizeof(int), cudaMemcpyDeviceToHost);
+        nnzC -= baseC;
+    }
+    cudaMalloc((void**)&d_csrColIndC, nnzC * sizeof(int));
+    cudaMalloc((void**)&d_csrValC, nnzC * sizeof(float));
+    double* h_C = (double*)malloc(nnzC * sizeof(float));
+    int* h_C_ColIndices = (int*)malloc(nnzC * sizeof(int));
+    cusparseScsrgemm(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, rows, rows, descrB, nnzB,
+        d_csrValB, d_csrRowPtrB, d_csrColIndB, descrA, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, descrC,
+        d_csrValC, d_csrRowPtrC, d_csrColIndC); // C = A * B 
+
+    // buffer size (START OF ILU)
+
+    int pBufferSize_M, pBufferSize_L, pBufferSize_U;
+    cusparseScsrilu02_bufferSize(handle, rows, nnzC, descrC, d_csrValC, d_csrRowPtrC, d_csrColIndC, info_C, &pBufferSize_M);
+
+    cusparseScsrsv2_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnzC,
+        descr_L, d_csrValC, d_csrRowPtrC, d_csrColIndC, info_L, &pBufferSize_L);
+    cusparseScsrsv2_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnzC,
+        descr_U, d_csrValC, d_csrRowPtrC, d_csrColIndC, info_U, &pBufferSize_U);
+
+    int pBufferSize = max(pBufferSize_M, max(pBufferSize_L, pBufferSize_U));
+    void* pBuffer = 0; cudaMalloc((void**)&pBuffer, pBufferSize);
+
+    int structural_zero;
+
+    // problem analysis
+
+    cusparseScsrilu02_analysis(handle, rows, nnzC, descrC, d_csrValC, d_csrRowPtrC, d_csrColIndC, info_C, CUSPARSE_SOLVE_POLICY_NO_LEVEL, pBuffer);
+    cusparseStatus_t status2 = cusparseXcsrilu02_zeroPivot(handle, info_C, &structural_zero);
+    if (CUSPARSE_STATUS_ZERO_PIVOT == status2) { printf("A(%d,%d) is missing\n", structural_zero, structural_zero); }
+    
+    cusparseScsrsv2_analysis(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnzC, descr_L,
+        d_csrValC, d_csrRowPtrC, d_csrColIndC,
+        info_L, CUSPARSE_SOLVE_POLICY_NO_LEVEL, pBuffer);
+
+    cusparseScsrsv2_analysis(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnzC, descr_U,
+        d_csrValC, d_csrRowPtrC, d_csrColIndC,
+        info_U, CUSPARSE_SOLVE_POLICY_USE_LEVEL, pBuffer);
+
+    // M = L * U
+
+    //cout << "M = L * U\n";
+
+    int numerical_zero;
+    cusparseScsrilu02(handle, rows, nnzC, descrC, d_csrValC, d_csrRowPtrC, d_csrColIndC, info_C, CUSPARSE_SOLVE_POLICY_NO_LEVEL, pBuffer);
+    status2 = cusparseXcsrilu02_zeroPivot(handle, info_C, &numerical_zero);
+    if (CUSPARSE_STATUS_ZERO_PIVOT == status2) { printf("U(%d,%d) is zero\n", numerical_zero, numerical_zero); }
+
+    cudaEventRecord(stop3);
+
+    cudaEventSynchronize(stop3);
+    float ilu_milli = 0;
+    cudaEventElapsedTime(&ilu_milli, start3, stop3);
+
+    cout << "Reordered ILU factorization done\n time: " << ilu_milli << endl;
+}
+
+
+int main()
+{
+    float* csrVal;
+    int* csrRowPtr;
+    int* csrColInd;
+
+    int nnz, rows, cols;
+    //read_mat("Matrices/offshore.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
+    read_mat("Matrices/parabolic_fem.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
+
+    cout << "Rows cols nnz " << rows << " " << cols << " " << nnz << endl;
+
+    int* d_csrRowPtr, * d_csrColInd;
+    float* d_csrVal;
+
+    // Separating space on GPU for matrix
+    cudaMalloc((void**)&d_csrRowPtr, (rows + 1) * sizeof(int));
+    cudaMalloc((void**)&d_csrColInd, nnz * sizeof(int));
+    cudaMalloc((void**)&d_csrVal, nnz * sizeof(float));
+
+    // Sending matrix info to GPU
+    cudaMemcpy(d_csrRowPtr, csrRowPtr, (rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_csrColInd, csrColInd, nnz * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_csrVal, csrVal, nnz * sizeof(int), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+
+    int* d_coloring, * d_reordering;
+
+    //regular_ilu(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd);
+
+    //graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd);
+
+    cusparse_graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, d_coloring, d_reordering);
+
+    //ilu_with_reordering(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd);
+
     
     delete[] csrVal;
     delete[] csrRowPtr;
     delete[] csrColInd;
-    delete[] colors;
 
     cudaFree(d_csrRowPtr);
     cudaFree(d_csrColInd);
