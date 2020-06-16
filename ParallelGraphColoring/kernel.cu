@@ -126,22 +126,15 @@ __global__ void color_jpl_kernel(int n, int c, const int* Ao,
     }
 }
 
-int get_rand(int max) {
-    srand((unsigned)time(NULL));
-    //srand(__rdtsc());
+int get_rand(int max, bool seed_time) {
+    if (seed_time) srand((unsigned)time(NULL));
+    else srand(__rdtsc());
     return rand() % max;
-
-   /* string str = "test";
-    std::seed_seq seed1(str.begin(), str.end());
-
-    std::mt19937 g2(seed1);
-
-    return (int)g2();*/
 }
 
-void init_rand_array(int*& randoms, int size) {
+void init_rand_array(int*& randoms, int size, bool seed_time) {
     for (int i = 0; i < size; i++) {
-        randoms[i] = get_rand(size << 2);
+        randoms[i] = get_rand(size << 2, seed_time);
         //cout << "rand " << randoms[i] << endl;
     }
 }
@@ -187,7 +180,8 @@ void color_jpl(int n,
 
 // graph_coloring
 
-void cusparse_graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, int*& d_coloring, int*& d_reordering) {
+void cusparse_graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, int*& d_coloring, int*& d_reordering, ofstream& outfile,
+    bool doing_ilu = false) {
     // color and reordering info
     
     int ncolors = 0, * coloring;
@@ -239,20 +233,15 @@ void cusparse_graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRow
     cout << "Milliseconds for operation (CC): " << milliseconds << endl;
     cout << "Colors: " << ncolors << endl;
 
+    if (!doing_ilu) {
+        outfile << "Milliseconds for operation (CC): " << milliseconds << endl;
+        outfile << "Colors: " << ncolors << endl;
+    }
+
 }
 
 // implemented algorithm
-void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd) {  
-    /*
-    for (int i = 0; i < rows; i++) {
-        printf("coloring[%d]: %d\n", i, coloring[i]);
-    }
-
-    for (int i = 0; i < rows; i++) {
-        printf("reordering[%d]: %d\n", i, reordering[i]);
-    }*/
-    //cout << "coloring " << coloring << endl;
-    //cout << "reordering " << reordering << endl;
+void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, ofstream& outfile, bool seed_time=true) {  
 
     int* colors = new int[rows];
     cout << "JPL algorithm time\n";
@@ -261,7 +250,7 @@ void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*
     randoms = new int[rows];
 
     cout << "Initializing random values\n";
-    init_rand_array(randoms, rows);
+    init_rand_array(randoms, rows, seed_time);
     cout << "Rand values initialized\n";
 
     int* d_randoms;
@@ -294,10 +283,13 @@ void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*
 
     cout << "Colors: " << jpl_colors << endl;
 
+    outfile << "JPL operation " << jpl_milli << endl;
+    outfile << "Colors: " << jpl_colors << endl;
+
     delete[] colors;
 }
 
-void regular_ilu(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd) {
+void regular_ilu(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, ofstream& outfile) {
     cudaEvent_t start3, stop3;
     cudaEventCreate(&start3);
     cudaEventCreate(&stop3);
@@ -394,6 +386,7 @@ void regular_ilu(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d
     cudaEventElapsedTime(&ilu_milli, start3, stop3);
 
     cout << "Regular ILU factorization done\n time: " << ilu_milli << endl;
+    outfile << "Regular ILU time: " << ilu_milli << endl;
 }
 
 // Auxiliar matrices of 1's created by reordering
@@ -418,7 +411,7 @@ __global__ void setB(float* d_B, const int N) {
 }
 
 // ILU factorization using graph coloring for reordering
-void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd) {
+void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, ofstream& outfile) {
     cudaEvent_t start3, stop3;
     cudaEventCreate(&start3);
     cudaEventCreate(&stop3);
@@ -434,7 +427,7 @@ void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr,
     const int BLOCKSIZE = 256;
 
     // graph coloring
-    cusparse_graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, d_coloring, d_csrColIndB);
+    cusparse_graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, d_coloring, d_csrColIndB, outfile, true);
 
     // storing coloring array and reordering array at host
     int* h_coloring = (int*)malloc(rows * sizeof(int));
@@ -520,6 +513,8 @@ void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr,
 
     // store at matrix C the reordered matrix
 
+    //cudaMalloc((void**)&d_csrRowPtrC, (rows + 1) * sizeof(int));
+
     // --- Performing the matrix - matrix multiplication
     int nnzB = nnz;
     int nnzC;
@@ -528,11 +523,9 @@ void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr,
 
     cusparseSetPointerMode(handle, CUSPARSE_POINTER_MODE_HOST);
 
-    //cudaMalloc((void**)&d_csrRowPtrC, (rows + 1) * sizeof(int));
-
     cusparseXcsrgemmNnz(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, rows, rows, descrB, nnzB,
         d_csrRowPtrB, d_csrColIndB, descrA, nnz, d_csrRowPtr, d_csrColInd, descrC, d_csrRowPtrC,
-        nnzTotalDevHostPtr);
+        nnzTotalDevHostPtr); // Find sparsity pattern
     if (NULL != nnzTotalDevHostPtr) nnzC = *nnzTotalDevHostPtr;
     else {
         cudaMemcpy(&nnzC, d_csrRowPtrC + rows, sizeof(int), cudaMemcpyDeviceToHost);
@@ -545,7 +538,7 @@ void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr,
     int* h_C_ColIndices = (int*)malloc(nnzC * sizeof(int));
     cusparseScsrgemm(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, rows, rows, descrB, nnzB,
         d_csrValB, d_csrRowPtrB, d_csrColIndB, descrA, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, descrC,
-        d_csrValC, d_csrRowPtrC, d_csrColIndC); // C = A * B 
+        d_csrValC, d_csrRowPtrC, d_csrColIndC); // Multiplication involving transposed matrices
 
     // buffer size (START OF ILU)
 
@@ -566,7 +559,7 @@ void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr,
 
     cusparseScsrilu02_analysis(handle, rows, nnzC, descrC, d_csrValC, d_csrRowPtrC, d_csrColIndC, info_C, CUSPARSE_SOLVE_POLICY_NO_LEVEL, pBuffer);
     cusparseStatus_t status2 = cusparseXcsrilu02_zeroPivot(handle, info_C, &structural_zero);
-    if (CUSPARSE_STATUS_ZERO_PIVOT == status2) { printf("A(%d,%d) is missing\n", structural_zero, structural_zero); }
+    //if (CUSPARSE_STATUS_ZERO_PIVOT == status2) { printf("A(%d,%d) is missing\n", structural_zero, structural_zero); }
     
     cusparseScsrsv2_analysis(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, rows, nnzC, descr_L,
         d_csrValC, d_csrRowPtrC, d_csrColIndC,
@@ -592,20 +585,26 @@ void ilu_with_reordering(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr,
     cudaEventElapsedTime(&ilu_milli, start3, stop3);
 
     cout << "Reordered ILU factorization done\n time: " << ilu_milli << endl;
+    outfile << "Reordered ILU time: " << ilu_milli << endl;
 }
 
+void do_operation(char* mat, int operation, ofstream& outfile, bool seed_for_gc = true) { // seed_for_gc -> false, use cpu cycles as seed
 
-int main()
-{
+    // operation
+    // 0 -> graph coloring with randoms
+    // 1 -> csrcolor graph coloring
+    // 2 -> ilu factorization using levels
+    // 3 -> ilu factorization using graph coloring
+
     float* csrVal;
     int* csrRowPtr;
     int* csrColInd;
 
     int nnz, rows, cols;
-    //read_mat("Matrices/offshore.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
-    read_mat("Matrices/parabolic_fem.mtx", csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
-
+    read_mat(mat, csrVal, csrRowPtr, csrColInd, cols, rows, nnz);
     cout << "Rows cols nnz " << rows << " " << cols << " " << nnz << endl;
+
+    outfile << "Matrix " << mat << endl;
 
     int* d_csrRowPtr, * d_csrColInd;
     float* d_csrVal;
@@ -622,16 +621,12 @@ int main()
     cudaDeviceSynchronize();
 
     int* d_coloring, * d_reordering;
-
-    //regular_ilu(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd);
-
-    //graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd);
-
-    cusparse_graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, d_coloring, d_reordering);
-
-    //ilu_with_reordering(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd);
-
     
+    if (operation == 0) graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, outfile, seed_for_gc);
+    else if (operation == 1) cusparse_graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, d_coloring, d_reordering, outfile);
+    else if (operation == 2) regular_ilu(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, outfile);
+    else if (operation == 3) ilu_with_reordering(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, outfile);
+
     delete[] csrVal;
     delete[] csrRowPtr;
     delete[] csrColInd;
@@ -639,5 +634,35 @@ int main()
     cudaFree(d_csrRowPtr);
     cudaFree(d_csrColInd);
     cudaFree(d_csrVal);
+}
 
+int main()
+{
+
+    ofstream outfile;
+
+    outfile.open("results.txt", std::ios_base::app);
+
+
+    for (int i = 0; i <= 3; i++) {
+        do_operation("Matrices/offshore.mtx", i, outfile);
+        do_operation("Matrices/af_shell3.mtx", i, outfile);
+        do_operation("Matrices/parabolic_fem.mtx", i, outfile);
+        do_operation("Matrices/apache2.mtx", i, outfile);
+        do_operation("Matrices/ecology2.mtx", i, outfile);
+        do_operation("Matrices/thermal2.mtx", i, outfile);
+        do_operation("Matrices/G3_circuit.mtx", i, outfile);
+    }
+
+    outfile << "Using CPU cycles as seed (JPL)\n";
+
+    do_operation("Matrices/offshore.mtx", 0, outfile, false);
+    do_operation("Matrices/af_shell3.mtx", 0, outfile, false);
+    do_operation("Matrices/parabolic_fem.mtx", 0, outfile, false);
+    do_operation("Matrices/apache2.mtx", 0, outfile, false);
+    do_operation("Matrices/ecology2.mtx", 0, outfile, false);
+    do_operation("Matrices/thermal2.mtx", 0, outfile, false);
+    do_operation("Matrices/G3_circuit.mtx", 0, outfile, false);
+
+    outfile.close();
 }
