@@ -1,0 +1,70 @@
+Matrix Matrices/offshore.mtx
+JPL operation 3.90458
+Colors: 7
+Matrix Matrices/offshore.mtx
+IMPROVED JPL
+JPL operation 3.79507
+Colors: 7
+Matrix Matrices/offshore.mtx
+JPL operation 3.79658
+Colors: 7
+Matrix Matrices/af_shell3.mtx
+JPL operation 10.6701
+Colors: 13
+Matrix Matrices/offshore.mtx
+IMPROVED JPL
+JPL operation 3.4535
+Colors: 6
+Matrix Matrices/af_shell3.mtx
+IMPROVED JPL
+JPL operation 8.98128
+Colors: 11
+Matrix Matrices/offshore.mtx
+JPL operation 3.90902
+Colors: 7
+Matrix Matrices/af_shell3.mtx
+JPL operation 10.0067
+Colors: 12
+Matrix Matrices/offshore.mtx
+IMPROVED JPL
+JPL operation 3.76736
+Colors: 7
+Matrix Matrices/af_shell3.mtx
+IMPROVED JPL
+JPL operation 9.61699
+Colors: 11
+Matrix Matrices/offshore.mtx
+JPL operation 4.52237
+Colors: 8
+Matrix Matrices/af_shell3.mtx
+JPL operation 10.0574
+Colors: 13
+Matrix Matrices/offshore.mtx
+IMPROVED JPL
+JPL operation 3.27066
+Colors: 6
+Matrix Matrices/af_shell3.mtx
+IMPROVED JPL
+JPL operation 9.89632
+Colors: 12
+Matrix Matrices/offshore.mtx
+JPL operation 3.54874
+Colors: 6
+Matrix Matrices/af_shell3.mtx
+JPL operation 10.1435
+Colors: 12
+Matrix Matrices/parabolic_fem.mtx
+JPL operation 6.86922
+Colors: 8
+Matrix Matrices/offshore.mtx
+IMPROVED JPL
+JPL operation 3.35434
+Colors: 6
+Matrix Matrices/af_shell3.mtx
+IMPROVED JPL
+JPL operation 9.3664
+Colors: 12
+Matrix Matrices/parabolic_fem.mtx
+IMPROVED JPL
+JPL operation 7.49162
+Colors: 9

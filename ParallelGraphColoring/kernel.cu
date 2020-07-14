@@ -20,6 +20,17 @@
 
 using namespace std;
 
+
+// https://stackoverflow.com/questions/24069524/error-using-ldg-in-cuda-kernel-at-compile-time/24073775
+template<typename T>
+__device__ __forceinline__ T ldg(const T* ptr) {
+#if __CUDA_ARCH__ >= 350
+    return __ldg(ptr);
+#else
+    return *ptr;
+#endif
+}
+
 int iDivUp(int a, int b) {
     return ((a % b) != 0) ? (a / b + 1) : (a / b);
 }
@@ -126,6 +137,47 @@ __global__ void color_jpl_kernel(int n, int c, const int* Ao,
     }
 }
 
+__global__ void color_jpl_kernel_improved(int n, int c, const int* Ao,
+    const int* Ac, const float* Av,
+    const int* randoms, int* colors)
+{
+    for (int i = threadIdx.x + blockIdx.x * blockDim.x;
+        i < n;
+        i += blockDim.x * gridDim.x)
+    {
+        //int i = threadIdx.x + blockIdx.x * blockDim.x;
+        //if (i < n){
+        bool f = true; // true iff you have max random
+
+        // ignore nodes colored earlier
+
+        int cur_color = ldg(&colors[i]);
+
+        if ((cur_color != -1)) continue;
+        //if ((colors[i] != -1)) return;
+
+        int ir = ldg(&randoms[i]);
+
+        // look at neighbors to check their random number
+        int start = ldg(&Ao[i]);
+        int end = ldg(&Ao[i + 1]);
+        for (int k = start; k < end; k++) {
+            // ignore nodes colored earlier (and yourself)
+            int j = ldg(&Ac[k]);
+            int jc = ldg(&colors[j]);
+            if (((jc != -1) && (jc != c)) || (i == j)) continue;
+            int jr = ldg(&randoms[j]);
+            if (ir <= jr) {
+                f = false;
+                break;
+            }
+        }
+
+        // assign color if you have the maximum random number
+        if (f) colors[i] = c;
+    }
+}
+
 int get_rand(int max, bool seed_time) {
     if (seed_time) srand((unsigned)time(NULL));
     else srand(__rdtsc());
@@ -158,6 +210,44 @@ void color_jpl(int n,
         //int nb = min((n + nt - 1) / nt, 1000);
         int nb = (ceil(n / nt));
         color_jpl_kernel << <nb, nt >> > (n, c,
+            Ao, Ac, Av,
+            d_randoms,
+            d_colors);
+        cudaDeviceSynchronize();
+        cudaMemcpy(colors, d_colors, n * sizeof(int), cudaMemcpyDeviceToHost);
+        int left = (int)thrust::count(colors, colors + n, -1);
+        //cout << "nodes left: " << left << endl;
+        if (left == 0) break;
+    }
+
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(colors, d_colors, n * sizeof(int), cudaMemcpyDeviceToHost);
+
+    //delete[] randoms;
+    //cudaFree(d_randoms);
+    cudaFree(d_colors);
+}
+
+void color_jpl_improved(int n,
+    const int* Ao, const int* Ac, const float* Av,
+    int* colors, int* d_randoms)
+{
+
+    thrust::fill(colors, colors + n, -1); // init colors to -1
+
+    int* d_colors;
+    cudaMalloc((void**)&d_colors, n * sizeof(int));
+    cudaMemcpy(d_colors, colors, n * sizeof(int), cudaMemcpyHostToDevice);
+
+    cout << "initiallized random numbers and colors\n";
+
+    //cout << "nodes left: " << (int)thrust::count(colors, colors + n, -1) << endl;
+    for (int c = 0; c < n; c++) {
+        int nt = 256;
+        //int nb = min((n + nt - 1) / nt, 1000);
+        int nb = (ceil(n / nt));
+        color_jpl_kernel_improved << <nb, nt >> > (n, c,
             Ao, Ac, Av,
             d_randoms,
             d_colors);
@@ -241,7 +331,7 @@ void cusparse_graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRow
 }
 
 // implemented algorithm
-void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, ofstream& outfile, bool seed_time=true) {  
+void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*& d_csrColInd, ofstream& outfile, bool seed_time=true, bool improved=false) {  
 
     int* colors = new int[rows];
     cout << "JPL algorithm time\n";
@@ -263,7 +353,9 @@ void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*
     cudaEventCreate(&stop2);
 
     cudaEventRecord(start2);
-    color_jpl(rows, d_csrRowPtr, d_csrColInd, d_csrVal, colors, d_randoms);
+    if (!improved) color_jpl(rows, d_csrRowPtr, d_csrColInd, d_csrVal, colors, d_randoms);
+    else color_jpl_improved(rows, d_csrRowPtr, d_csrColInd, d_csrVal, colors, d_randoms);
+    //color_jpl(rows, d_csrRowPtr, d_csrColInd, d_csrVal, colors, d_randoms);
     cudaEventRecord(stop2);
 
     cudaEventSynchronize(stop2);
@@ -283,6 +375,7 @@ void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*
 
     cout << "Colors: " << jpl_colors << endl;
 
+    if (improved) outfile << "IMPROVED JPL" << endl;
     outfile << "JPL operation " << jpl_milli << endl;
     outfile << "Colors: " << jpl_colors << endl;
 
@@ -626,6 +719,7 @@ void do_operation(char* mat, int operation, ofstream& outfile, bool seed_for_gc 
     else if (operation == 1) cusparse_graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, d_coloring, d_reordering, outfile);
     else if (operation == 2) regular_ilu(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, outfile);
     else if (operation == 3) ilu_with_reordering(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, outfile);
+    else if (operation == 4) graph_coloring(rows, nnz, d_csrVal, d_csrRowPtr, d_csrColInd, outfile, seed_for_gc, true);
 
     delete[] csrVal;
     delete[] csrRowPtr;
@@ -641,10 +735,9 @@ int main()
 
     ofstream outfile;
 
-    outfile.open("results.txt", std::ios_base::app);
+    outfile.open("results2.txt", std::ios_base::app);
 
-
-    for (int i = 0; i <= 3; i++) {
+    /*for (int i = 0; i <= 3; i++) {
         do_operation("Matrices/offshore.mtx", i, outfile);
         do_operation("Matrices/af_shell3.mtx", i, outfile);
         do_operation("Matrices/parabolic_fem.mtx", i, outfile);
@@ -654,15 +747,19 @@ int main()
         do_operation("Matrices/G3_circuit.mtx", i, outfile);
     }
 
-    outfile << "Using CPU cycles as seed (JPL)\n";
+    outfile << "Using CPU cycles as seed (JPL)\n";*/
 
     do_operation("Matrices/offshore.mtx", 0, outfile, false);
     do_operation("Matrices/af_shell3.mtx", 0, outfile, false);
     do_operation("Matrices/parabolic_fem.mtx", 0, outfile, false);
-    do_operation("Matrices/apache2.mtx", 0, outfile, false);
+    /*do_operation("Matrices/apache2.mtx", 0, outfile, false);
     do_operation("Matrices/ecology2.mtx", 0, outfile, false);
     do_operation("Matrices/thermal2.mtx", 0, outfile, false);
-    do_operation("Matrices/G3_circuit.mtx", 0, outfile, false);
+    do_operation("Matrices/G3_circuit.mtx", 0, outfile, false);*/
+
+    do_operation("Matrices/offshore.mtx", 4, outfile, false);
+    do_operation("Matrices/af_shell3.mtx", 4, outfile, false);
+    do_operation("Matrices/parabolic_fem.mtx", 4, outfile, false);
 
     outfile.close();
 }
