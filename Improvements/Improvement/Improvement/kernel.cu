@@ -12,6 +12,13 @@
 
 #include <thrust/count.h>
 
+#include <thrust/reduce.h>
+#include <thrust/functional.h>
+#include <thrust/execution_policy.h>
+#include <thrust/fill.h>
+
+//#include <curand.h>
+
 #include <random>
 // random number generator
 #include <intrin.h>
@@ -145,8 +152,6 @@ __global__ void color_jpl_kernel_improved(int n, int c, const int* Ao,
         i < n;
         i += blockDim.x * gridDim.x)
     {
-        //int i = threadIdx.x + blockIdx.x * blockDim.x;
-        //if (i < n){
         bool f = true; // true iff you have max random
 
         // ignore nodes colored earlier
@@ -154,8 +159,6 @@ __global__ void color_jpl_kernel_improved(int n, int c, const int* Ao,
         int cur_color = ldg(&colors[i]);
 
         if ((cur_color != -1)) continue;
-        //if ((colors[i] != -1)) return;
-
         int ir = ldg(&randoms[i]);
 
         // look at neighbors to check their random number
@@ -234,26 +237,24 @@ void color_jpl_improved(int n,
     int* colors, int* d_randoms)
 {
 
-    thrust::fill(colors, colors + n, -1); // init colors to -1
-
     int* d_colors;
     cudaMalloc((void**)&d_colors, n * sizeof(int));
-    cudaMemcpy(d_colors, colors, n * sizeof(int), cudaMemcpyHostToDevice);
+    //cudaMemcpy(d_colors, colors, n * sizeof(int), cudaMemcpyHostToDevice);
+
+    thrust::fill(thrust::device, d_colors, d_colors + n, -1); // init colors to -1
 
     cout << "initiallized random numbers and colors\n";
 
     //cout << "nodes left: " << (int)thrust::count(colors, colors + n, -1) << endl;
     for (int c = 0; c < n; c++) {
         int nt = 256;
-        //int nb = min((n + nt - 1) / nt, 1000);
         int nb = (ceil(n / nt));
         color_jpl_kernel_improved << <nb, nt >> > (n, c,
             Ao, Ac, Av,
             d_randoms,
             d_colors);
         cudaDeviceSynchronize();
-        cudaMemcpy(colors, d_colors, n * sizeof(int), cudaMemcpyDeviceToHost);
-        int left = (int)thrust::count(colors, colors + n, -1);
+        int left = (int)thrust::count(thrust::device, d_colors, d_colors+n, -1);
         //cout << "nodes left: " << left << endl;
         if (left == 0) break;
     }
@@ -338,13 +339,38 @@ void graph_coloring(int rows, int nnz, float*& d_csrVal, int*& d_csrRowPtr, int*
 
     int* randoms; // allocate and init random array 
     randoms = new int[rows];
+    
+    int* d_randoms;
+
+    cudaMalloc((void**)&d_randoms, rows * sizeof(int));
 
     cout << "Initializing random values\n";
     init_rand_array(randoms, rows, seed_time);
-    cout << "Rand values initialized\n";
+    /*
+    * Usage of curand
+    * Didn't give better results
+    else {
+        curandGenerator_t gen;
+        unsigned int* d_randoms2;
 
-    int* d_randoms;
-    cudaMalloc((void**)&d_randoms, rows * sizeof(int));
+        // Allocate n floats on device
+        cudaMalloc((void**)&d_randoms2, rows * sizeof(int));
+
+        // Create pseudo-random number generator 
+        curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+
+        // Set seed
+        curandSetPseudoRandomGeneratorSeed(gen, 1234ULL);
+
+        // Generate n floats on device
+        curandGenerate(gen, d_randoms2, rows);
+
+        //  Cleanup
+        //curandDestroyGenerator(gen);
+        //cudaMemcpy(randoms, d_randoms2, rows * sizeof(int), cudaMemcpyDeviceToHost);
+    }
+    */
+    cout << "Rand values initialized\n";
 
     cudaMemcpy(d_randoms, randoms, rows * sizeof(int), cudaMemcpyHostToDevice);
 
@@ -392,7 +418,7 @@ __global__ void initialize(int* coloring, bool* colored, int m) {
     }
 }
 
-__global__ void firstFit(int m, int* csrRowPtr, int* csrColInd, int* coloring, bool* changed) {
+__global__ void firstFit(int rows, int* csrRowPtr, int* csrColInd, int* coloring, bool* changed) {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
     bool forbiddenColors[MAXCOLOR + 1];
     if (coloring[id] == MAXCOLOR) {
@@ -416,7 +442,7 @@ __global__ void firstFit(int m, int* csrRowPtr, int* csrColInd, int* coloring, b
     }
 }
 
-__global__ void conflictResolve(int m, int* csrRowPtr, int* csrColInd, int* coloring, bool* colored) {
+__global__ void conflictResolve(int rows, int* csrRowPtr, int* csrColInd, int* coloring, bool* colored) {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (!colored[id]) {
         int row_begin = csrRowPtr[id];
@@ -457,8 +483,8 @@ void ffit_color(int rows, int nnz, int* d_csrRowPtr, int* d_csrColInd, int* colo
         int nblocks = (rows - 1) / blksz + 1;
         firstFit << <nblocks, blksz >> > (rows, d_csrRowPtr, d_csrColInd, d_coloring, changed);
         conflictResolve << <nblocks, blksz >> > (rows, d_csrRowPtr, d_csrColInd, d_coloring, d_colored);
+        cudaDeviceSynchronize();
         cudaMemcpy(&hchanged, changed, sizeof(hchanged), cudaMemcpyDeviceToHost);
-        //left = (int)thrust::count(thrust::device, conflicted, conflicted + m, 1);
     } while (hchanged);
     cudaDeviceSynchronize();
     
